@@ -147,6 +147,8 @@ Prints a status message so you know the receiver is waiting. `Ctrl+C` in the ter
 
 Creates a callback, which is code RabbitMQ's client runs each time a message is delivered. `consumerTag` identifies this consumer; this example does not use it. `delivery` contains the received message and its metadata. The `->` syntax is a Java lambda expression.
 
+The callback does not poll the queue or run by itself. Registering it with `basicConsume` tells the client to call it whenever a message is delivered. If a message is already waiting, it may be called soon after registration; otherwise it is called when a publisher sends a message. The callback is the receiver's message-handling code: RabbitMQ delivers the message to the client, and the client invokes the callback with the delivery.
+
 ```java
             String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
 ```
@@ -164,7 +166,9 @@ Prints the received text, then closes the callback definition.
         channel.basicConsume(QUEUE_NAME, true, deliverCallback, consumerTag -> { });
 ```
 
-Starts consuming messages from `hello`. The second argument, `true`, enables automatic acknowledgement: RabbitMQ considers a message handled as soon as it delivers it to this program. `deliverCallback` handles each message. The final callback is for consumer cancellation; its body is empty because this example takes no action when cancellation happens. `basicConsume` registers the consumer, and the Java client keeps the connection active while it waits for deliveries.
+Starts consuming messages from `hello`. The second argument, `true`, enables automatic acknowledgement: RabbitMQ considers a message handled as soon as it delivers it to the client, before the callback finishes processing. `deliverCallback` handles each message: it decodes and prints the body, then returns. The client remains registered and invokes it again for later deliveries. With automatic acknowledgement, if the callback fails or the program stops before processing finishes, RabbitMQ may already consider that message handled and will not requeue it.
+
+The final callback is for consumer cancellation; its body is empty because this example takes no action when cancellation happens. For safer processing, automatic acknowledgement can be disabled (`false`) and the callback can acknowledge a message with `channel.basicAck(...)` only after processing succeeds. If the consumer stops before acknowledging, RabbitMQ can requeue that message for another delivery. The `basicQos(1)` prefetch setting is useful with manual acknowledgements: it limits this consumer to one unacknowledged message at a time, so RabbitMQ waits for an acknowledgement before sending the next one.
 
 ```java
     }
@@ -266,6 +270,56 @@ Prints a confirmation in the terminal. It confirms the publishing call returned;
 ```
 
 The braces end the try block, `main` method, and `Send` class. When the try block ends, Java automatically closes the channel and connection.
+
+## Publish/subscribe with `EmitLog.java` and `ReceiveLogs.java`
+
+This pair demonstrates a `fanout` exchange. Unlike `Send`/`Recv`, the publisher sends to an exchange rather than naming a queue. The exchange copies each published message to every queue currently bound to it. Each running `ReceiveLogs` process creates its own temporary queue, so each receiver gets a copy of messages published while it is subscribed. Because these queues are temporary, messages sent while no receiver is running are not kept for a later receiver.
+
+Your `RMQOcto` variable can be used as the classpath. Set it in each terminal session if needed:
+
+```bash
+export RMQOcto=.:amqp-client-5.16.0.jar:slf4j-api-1.7.36.jar:slf4j-simple-1.7.36.jar
+```
+
+Compile the two programs:
+
+```bash
+javac -cp "$RMQOcto" EmitLog.java ReceiveLogs.java
+```
+
+Run `ReceiveLogs` in one terminal and leave it running:
+
+```bash
+java -cp "$RMQOcto" ReceiveLogs
+```
+
+In another terminal, publish a message:
+
+```bash
+java -cp "$RMQOcto" EmitLog Hello from RabbitMQ
+```
+
+The receiver should print the message. You can start multiple `ReceiveLogs` processes in separate terminals; each gets a copy of messages published while its temporary queue is bound. Stop a receiver with `Ctrl+C`.
+
+### How `EmitLog.java` works
+
+- `EXCHANGE_NAME = "logs"` gives the publisher and receiver a shared exchange name.
+- `new ConnectionFactory()` and `setHost("localhost")` configure a connection to the local RabbitMQ server.
+- The try-with-resources block opens a connection and channel and closes them automatically when publishing is done.
+- `exchangeDeclare(EXCHANGE_NAME, BuiltinExchangeType.FANOUT)` declares a fanout exchange named `logs`. Declaring it on both sides is safe when the exchange settings match.
+- `argv.length < 1 ? "info: Hello World!" : String.join(" ", argv)` uses a default message when no command-line text is provided; otherwise it joins all supplied words with spaces.
+- `basicPublish(EXCHANGE_NAME, "", null, message.getBytes(StandardCharsets.UTF_8))` publishes UTF-8 message bytes to `logs`. The empty routing key is ignored by a fanout exchange; `null` means no extra message properties are set.
+- The `println` reports that the publish call completed. It does not prove a receiver got the message.
+
+### How `ReceiveLogs.java` works
+
+- It creates a connection factory, sets the host to `localhost`, then opens a connection and channel. These remain open so the receiver can keep listening.
+- `exchangeDeclare("logs", FANOUT)` ensures the fanout exchange exists.
+- `queueDeclare().getQueue()` asks RabbitMQ to create a server-named, temporary queue. Each receiver gets its own queue.
+- `queueBind(queueName, "logs", "")` binds that queue to the exchange. A fanout exchange ignores the routing key, so the empty string is suitable.
+- The `DeliverCallback` runs for each delivered message. It decodes the body as UTF-8 and prints it.
+- `basicConsume(queueName, true, deliverCallback, ...)` registers the callback with automatic acknowledgement. RabbitMQ considers a delivery handled as soon as it sends it to the client, before the callback finishes.
+- The final empty callback handles consumer cancellation; it takes no action here. `Ctrl+C` ends the long-running receiver process.
 
 ## Where to find the official tutorial examples
 

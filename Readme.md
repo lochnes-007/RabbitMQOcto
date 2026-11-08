@@ -370,6 +370,85 @@ If no severity is provided, `EmitLogDirect` uses `info`. If the severity is give
 - `basicConsume(queueName, true, deliverCallback, ...)` registers the callback with automatic acknowledgement, so RabbitMQ considers each message handled as it delivers it to the client.
 - The final empty callback does nothing on consumer cancellation. The receiver keeps listening until stopped with `Ctrl+C`.
 
+## Match routing patterns with `EmitLogTopic.java` and `ReceiveLogsTopic.java`
+
+This pair demonstrates a `topic` exchange. Topic routing keys are words separated by dots, for example `kern.critical` or `app.auth.error`. A queue binding can use a pattern: `*` matches exactly one word, while `#` matches zero or more words. RabbitMQ sends a message to each queue whose binding pattern matches the message's routing key.
+
+Think of the exchange as a mail sorting room. The publisher writes a category label on each message (the routing key); a receiver queue has a sorting rule (the binding pattern). The topic exchange reads the label and copies the message into every queue whose rule matches. The publisher does not need to know which queues exist. For example, a publisher can send `app.auth.error` once, and separate queues can independently subscribe to `app.*.error`, `app.auth.*`, or `#`.
+
+Routing keys are made of dot-separated words. The dots define the word boundaries; `*` and `#` are special only in binding patterns. For example, `app.auth.error` has three words: `app`, `auth`, and `error`.
+
+| Binding pattern | Matches `kern.critical` | Matches `app.auth.error` | Why |
+| --- | --- | --- | --- |
+| `kern.*` | Yes | No | `*` matches exactly one word after `kern`. |
+| `*.auth.*` | No | Yes | Each `*` matches one word, so this requires exactly three words with `auth` in the middle. |
+| `app.#` | No | Yes | `#` matches zero or more words after `app`. |
+| `#` | Yes | Yes | It matches any routing key, including one with several words. |
+| `kern.#` | Yes | No | It matches routing keys starting with `kern`, with zero or more words after it. |
+
+The exchange type determines how strict matching is. A `direct` exchange requires the routing key and binding key to be identical. A `topic` exchange allows the `*` and `#` patterns. A `fanout` exchange ignores the routing key and sends to all bound queues.
+
+Compile both programs with your `RMQOcto` classpath:
+
+```bash
+javac -cp "$RMQOcto" EmitLogTopic.java ReceiveLogsTopic.java
+```
+
+Start a receiver in one terminal. This pattern subscribes to all routing keys with `kern` as the first word:
+
+```bash
+java -cp "$RMQOcto" ReceiveLogsTopic 'kern.*'
+```
+
+In another terminal, publish messages:
+
+```bash
+java -cp "$RMQOcto" EmitLogTopic kern.critical Kernel failure
+java -cp "$RMQOcto" EmitLogTopic app.auth.error Login failed
+```
+
+The receiver gets `kern.critical` because it matches `kern.*`. It does not get `app.auth.error`. Try a broad binding such as `#` to receive every message, or `*.auth.*` to receive three-word routing keys whose middle word is `auth`:
+
+```bash
+java -cp "$RMQOcto" ReceiveLogsTopic '#'
+java -cp "$RMQOcto" ReceiveLogsTopic '*.auth.*'
+```
+
+Quote wildcard patterns in the shell so the shell passes `*` and `#` to Java unchanged. Each receiver creates a temporary queue, so run it before publishing to receive those messages. If no routing key is given to `EmitLogTopic`, it defaults to `anonymous.info`; if no message text follows the routing key, it defaults to `Hello World!`.
+
+Here is how the first publish command is interpreted:
+
+```bash
+java -cp "$RMQOcto" EmitLogTopic kern.critical Kernel failure
+```
+
+Java receives `argv[0]` as `kern.critical`, `argv[1]` as `Kernel`, and `argv[2]` as `failure`. The program uses the first argument as the routing key and joins the remaining arguments with spaces to form `Kernel failure`. The receiver's `kern.*` binding matches because `kern` matches the first word and `*` matches the one remaining word, `critical`.
+
+For another example, `app.auth.error Login failed` has the routing key `app.auth.error` and message text `Login failed`. A receiver bound with `*.auth.*` gets it: the first `*` matches `app`, the literal `auth` matches the second word, and the last `*` matches `error`. The `kern.*` receiver does not get that message because its pattern does not match.
+
+### How `EmitLogTopic.java` works
+
+- `private static final String EXCHANGE_NAME = "topic_logs";` defines a constant name for the exchange. The receiver uses the same name so both programs refer to the same exchange.
+- `new ConnectionFactory()` creates the connection settings object, and `setHost("localhost")` points it at the broker on this computer. The try-with-resources statement opens a connection and channel, then closes both when publishing finishes.
+- `exchangeDeclare(EXCHANGE_NAME, BuiltinExchangeType.TOPIC)` ensures the exchange exists and is a topic exchange. If it already exists with a different type, RabbitMQ rejects the declaration.
+- `getRouting(argv)` selects the routing key. With `EmitLogTopic app.auth.error Login failed`, it returns `app.auth.error`; with no arguments, it returns `anonymous.info`.
+- `getMessage(argv)` takes all arguments after the routing key and joins them with spaces. In that example, it returns `Login failed`. If the command has no second argument, it returns `Hello World!`.
+- `basicPublish(EXCHANGE_NAME, routingKey, null, ...)` publishes to the `topic_logs` exchange. Its second argument is the message's routing key, not a queue name. The topic exchange compares this key to each bound queue's pattern. `null` means no extra message properties are supplied.
+- `message.getBytes("UTF-8")` converts the Java text into bytes for the message body, using UTF-8 so text can be represented consistently.
+- `System.out.println(...)` displays the routing key and body. It shows what the publisher sent; it does not confirm that a queue matched or a receiver processed the message.
+- `joinStrings(strings, " ", 1)` builds the body from the argument array starting at index 1. The loop appends each later word with a space, so `Login` and `failed` become `Login failed`.
+
+### How `ReceiveLogsTopic.java` works
+
+- `newConnection()` opens a connection to RabbitMQ, and `createChannel()` creates the channel used for exchange, queue, binding, and consume operations. These stay open while the receiver waits.
+- `exchangeDeclare("topic_logs", TOPIC)` declares the same exchange with the same type as the publisher. Declaring it on both sides makes either program able to start first.
+- `queueDeclare().getQueue()` asks RabbitMQ to create a queue and choose its name. With no durability or name options, this queue is temporary and exclusive to the connection. Think of it as a short-lived inbox created for this receiver; when the receiver disconnects, the inbox is removed.
+- The `argv.length < 1` check requires at least one binding pattern. If you start the class with no patterns, it prints an example of the expected command and exits rather than waiting without any subscription.
+- `for (String bindingKey : argv)` visits every pattern supplied at launch. `queueBind(queueName, EXCHANGE_NAME, bindingKey)` attaches the receiver's queue to the exchange using that pattern. For `ReceiveLogsTopic kern.* '*.auth.*'`, the queue has two rules and receives a message if either rule matches its routing key.
+- `DeliverCallback` is the code the Java client runs for each delivery. It decodes the byte body as UTF-8 and prints the routing key from the message envelope alongside the message text. Seeing the routing key helps explain why the pattern matched.
+- `basicConsume(queueName, true, deliverCallback, ...)` registers the callback to receive messages. The `true` enables automatic acknowledgement, so RabbitMQ treats each delivery as handled as soon as it sends it to this client, before the callback finishes.
+- The final empty callback is for consumer cancellation and performs no action. The process remains active waiting for messages; press `Ctrl+C` to stop it and remove its temporary queue.
+
 ## Where to find the official tutorial examples
 
 RabbitMQ's tutorial pages explain each concept, while the companion repository contains runnable source code in different languages:

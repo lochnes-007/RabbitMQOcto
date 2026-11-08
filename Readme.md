@@ -321,6 +321,55 @@ The receiver should print the message. You can start multiple `ReceiveLogs` proc
 - `basicConsume(queueName, true, deliverCallback, ...)` registers the callback with automatic acknowledgement. RabbitMQ considers a delivery handled as soon as it sends it to the client, before the callback finishes.
 - The final empty callback handles consumer cancellation; it takes no action here. `Ctrl+C` ends the long-running receiver process.
 
+## Route messages with `EmitLogDirect.java` and `ReceiveLogsDirect.java`
+
+This pair demonstrates a `direct` exchange. A direct exchange sends a message to queues whose binding key exactly matches the message's routing key. Here the routing key is the log severity, such as `info`, `warning`, or `error`. Unlike the fanout example, a receiver can select which severities it wants by binding its queue to those keys.
+
+Compile both programs from the project folder using your `RMQOcto` classpath:
+
+```bash
+javac -cp "$RMQOcto" EmitLogDirect.java ReceiveLogsDirect.java
+```
+
+Start a receiver in one terminal, subscribing it to `warning` and `error`:
+
+```bash
+java -cp "$RMQOcto" ReceiveLogsDirect warning error
+```
+
+In another terminal, send messages with different severities:
+
+```bash
+java -cp "$RMQOcto" EmitLogDirect info This is an informational message
+java -cp "$RMQOcto" EmitLogDirect warning This is a warning
+java -cp "$RMQOcto" EmitLogDirect error Something failed
+```
+
+The receiver prints the `warning` and `error` messages. It does not receive `info`, because its queue is not bound with the `info` routing key. Start another receiver with `info` to receive messages routed with that key. These receivers each create temporary queues, so start them before publishing if you want them to get the messages.
+
+If no severity is provided, `EmitLogDirect` uses `info`. If the severity is given without message text, it sends `Hello World!`. For example, `java -cp "$RMQOcto" EmitLogDirect` publishes the default `info` message.
+
+### How `EmitLogDirect.java` works
+
+- `EXCHANGE_NAME = "direct_logs"` names the exchange shared with the receivers.
+- The factory and `setHost("localhost")` configure a connection to the local RabbitMQ server. The try-with-resources block closes the connection and channel after publishing.
+- `exchangeDeclare(EXCHANGE_NAME, BuiltinExchangeType.DIRECT)` declares a direct exchange. The exchange type determines that routing keys must match bindings exactly.
+- `getSeverity(argv)` uses the first command-line argument as the routing key, or `info` if no argument was given.
+- `getMessage(argv)` uses the remaining arguments as message text joined with spaces, or defaults to `Hello World!`.
+- `basicPublish(EXCHANGE_NAME, severity, ...)` publishes to `direct_logs`, using the severity as the routing key. `null` means no extra properties are set; the message is encoded as UTF-8 bytes.
+- The output line reports the severity and message the program attempted to publish.
+- `joinStrings` combines the message arguments from the given starting index, putting a space between each one.
+
+### How `ReceiveLogsDirect.java` works
+
+- It connects to `localhost`, creates a channel, and declares the same `direct_logs` exchange with the same exchange type.
+- `queueDeclare().getQueue()` creates a server-named temporary queue for this receiver.
+- If no severities are provided, it prints the usage instructions and exits.
+- The loop calls `queueBind` once per supplied severity. Each binding key selects messages with that exact routing key. Multiple bindings let one receiver get several severities.
+- Its delivery callback decodes the body as UTF-8 and prints both the delivery's routing key and the message.
+- `basicConsume(queueName, true, deliverCallback, ...)` registers the callback with automatic acknowledgement, so RabbitMQ considers each message handled as it delivers it to the client.
+- The final empty callback does nothing on consumer cancellation. The receiver keeps listening until stopped with `Ctrl+C`.
+
 ## Where to find the official tutorial examples
 
 RabbitMQ's tutorial pages explain each concept, while the companion repository contains runnable source code in different languages:

@@ -70,6 +70,109 @@ On success, the program prints:
 
 This means the program reached its confirmation print after publishing. To see the message, run the tutorial's receiving program; the print by itself does not mean a consumer received it.
 
+## Run `Recv.java`
+
+Compile and run the receiver in a second terminal from this project folder:
+
+```bash
+javac -cp ".:amqp-client-5.16.0.jar" Recv.java
+java -cp ".:amqp-client-5.16.0.jar:slf4j-api-1.7.36.jar" Recv
+```
+
+Start the receiver before running `Send` if you want to watch it receive a message immediately. If `Send` ran first, its message remains in the durable queue and the receiver can read it later, provided no other consumer already took it. The receiver keeps running and prints `Waiting for messages`; stop it with `Ctrl+C`.
+
+The sender and receiver must use the **same queue name** (`hello`) and compatible queue settings. The sender publishes to the `hello` queue, and the receiver listens to that queue. A different name would refer to a different queue, so the receiver would wait on the wrong mailbox. Both programs declare the queue with the same durable, exclusive, auto-delete, and quorum settings; RabbitMQ requires declarations of an existing queue to match.
+
+## `Recv.java`, explained line by line
+
+```java
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Connection;
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.DeliverCallback;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+```
+
+These imports make the RabbitMQ connection, channel, and delivery callback classes available, along with UTF-8 decoding and the map used for queue options.
+
+```java
+public class Recv {
+```
+
+Declares the public class `Recv`. The source file is named `Recv.java` to match it.
+
+```java
+    private final static String QUEUE_NAME = "hello";
+```
+
+Defines the queue name as a constant. It must match the publisher's queue name so both programs use the same queue.
+
+```java
+    public static void main(String[] argv) throws Exception {
+```
+
+Declares the program's entry point. `argv` can contain command-line arguments, but this program does not use them. `throws Exception` lets connection or RabbitMQ errors propagate.
+
+```java
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+```
+
+Creates a connection factory and configures it to connect to RabbitMQ on this computer. With the default settings, the client uses port 5672 and the default guest credentials.
+
+```java
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+```
+
+Opens a network connection to the broker and creates a channel for RabbitMQ operations. The connection is like a phone call to the server; the channel is a work lane within that call. Unlike the sender's try-with-resources block, these resources are not automatically closed here. The program is intended to keep running as a consumer until it is stopped.
+
+```java
+        channel.queueDeclare(QUEUE_NAME, true, false, false,
+                             Map.of("x-queue-type", "quorum"));
+```
+
+Declares the `hello` queue if it does not already exist, with durable set to `true`, exclusive set to `false`, auto-delete set to `false`, and queue type `quorum`. These settings must match the publisher's declaration. Declaring the queue on the receiving side ensures it exists before consumption begins.
+
+```java
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+```
+
+Prints a status message so you know the receiver is waiting. `Ctrl+C` in the terminal stops the program.
+
+```java
+        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+```
+
+Creates a callback, which is code RabbitMQ's client runs each time a message is delivered. `consumerTag` identifies this consumer; this example does not use it. `delivery` contains the received message and its metadata. The `->` syntax is a Java lambda expression.
+
+```java
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+```
+
+Gets the message body as bytes and decodes those bytes into a Java string using UTF-8, matching the encoding used by `Send`.
+
+```java
+            System.out.println(" [x] Received '" + message + "'");
+        };
+```
+
+Prints the received text, then closes the callback definition.
+
+```java
+        channel.basicConsume(QUEUE_NAME, true, deliverCallback, consumerTag -> { });
+```
+
+Starts consuming messages from `hello`. The second argument, `true`, enables automatic acknowledgement: RabbitMQ considers a message handled as soon as it delivers it to this program. `deliverCallback` handles each message. The final callback is for consumer cancellation; its body is empty because this example takes no action when cancellation happens. `basicConsume` registers the consumer, and the Java client keeps the connection active while it waits for deliveries.
+
+```java
+    }
+}
+```
+
+The braces close `main` and the `Recv` class.
+
 ## `Send.java`, explained line by line
 
 ```java
